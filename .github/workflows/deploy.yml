@@ -1,0 +1,72 @@
+name: Deploy ytdlp-service to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PROJECT_ID: lab-create-os
+      REGION: us-central1
+      SERVICE_NAME: ytdlp-service
+      REPO: ytdlp-service-repo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Create Artifact Registry repo (idempotent)
+        run: |
+          gcloud artifacts repositories create "$REPO" \
+            --repository-format=docker \
+            --location="$REGION" \
+            --project="$PROJECT_ID" 2>/dev/null || true
+
+      - name: Build image via Cloud Build
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE_NAME }}"
+          gcloud builds submit . \
+            --tag="$IMAGE" \
+            --project="${{ env.PROJECT_ID }}" \
+            --timeout=20m
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.SERVICE_NAME }}"
+          gcloud run deploy "$SERVICE_NAME" \
+            --image="$IMAGE" \
+            --platform=managed \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --no-allow-unauthenticated \
+            --cpu=4 \
+            --memory=8Gi \
+            --timeout=600 \
+            --concurrency=4 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --service-account="viz-chat-service-account@lab-create-os.iam.gserviceaccount.com" \
+            --set-env-vars="GCS_BUCKET=${{ secrets.GCS_BUCKET }},MAX_PARALLEL=4,YTDLP_IMPERSONATE=Chrome-131,RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}"
+
+      - name: Print service URL
+        run: |
+          gcloud run services describe "$SERVICE_NAME" \
+            --region="$REGION" --project="$PROJECT_ID" \
+            --format="value(status.url)"
